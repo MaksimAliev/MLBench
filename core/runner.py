@@ -8,17 +8,16 @@ from collections import Counter
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import Union, Optional, List, final
-
+from typing import Any, Callable, Dict, Tuple, Union, Optional, List, cast, final
 import numpy as np
 import pandas as pd
 from sklearn.exceptions import NotFittedError
+from loguru import logger
 
 from core.automl import AutoML, Imbaml, AutoGluon
 from core.domain import TabularDataset, MLTask
 from core.preprocessing import TabularDatasetPreprocessor
-from benchmark.repository import FittedModel, OpenMLRepository, ZenodoRepository
-from loguru import logger
+from benchmark.repository import FittedModel, OpenMLRepository, TabularDatasetRepository, ZenodoRepository
 
 
 # TODO: support presets and leaderboard.
@@ -26,43 +25,22 @@ class MLBench:
     def __init__(
         self,
         automl = 'ag',
-        metric: Union[str, List[str]] = 'f1',
+        validation_metric = 'f1',
         repository = 'zenodo',
         log_to_file = True,
+        test_metrics: Optional[List[str]] = None,
         *args,
         **kwargs
     ):
-        # TODO: use setters.
-        def __validate_metrics(metric: str):
-            if metric not in ['f1', 'bal_acc', 'ap']:
-                raise ValueError(
-                    f"""
-                    Invalid value of metric parameter: {metric}.
-                    Options available: ['f1', 'bal_acc', 'ap'].
-                    """)
-        if isinstance(metric, list):
-            for m in metric:
-                __validate_metrics(m)
-            self._metrics = metric
-        else:
-            __validate_metrics(metric)
-            self._metrics = [metric]
-
-        if automl == 'ag':
-            self._automl = AutoGluon(*args, **kwargs)
-        elif automl == 'imbaml':
-            self._automl = Imbaml(*args, **kwargs)
-        else:
-            raise ValueError(
-                f"""
-                Invalid value of automl parameter: {automl}.
-                Options available: ['ag', 'imbaml'].
-                """)
-        
+        self._validation_metric: str
+        self._automl: AutoML
         self._fitted_model: Optional[FittedModel]
-        self._log_to_file = log_to_file
-        
+
+        self.validation_metric = validation_metric
+        self.automl = (automl, args, kwargs)
         self.repository = repository
+        self._log_to_file = log_to_file
+        self._test_metrics = test_metrics
 
         self._configure_environment()
 
@@ -72,19 +50,16 @@ class MLBench:
             self._run_on_dataset(dataset)
 
     def _configure_environment(self) -> None:
-        logging_handlers = []
+        # if self._log_to_file:
+        #     log_filepath = 'logs/'
+        #     Path(log_filepath).mkdir(parents=True, exist_ok=True)
+        #     log_filepath += datetime.now().strftime(f'{self._automl} {",".join(self.validation_metric)} %Y.%m.%d %H:%M:%S')
+        #     log_filepath += '.log'
+        #     logging_handlers.append(logging.FileHandler(filename=log_filepath, encoding='utf-8', mode='w'))
 
-        if self._log_to_file:
-            log_filepath = 'logs/'
-            Path(log_filepath).mkdir(parents=True, exist_ok=True)
-            log_filepath += datetime.now().strftime(f'{self._automl} {",".join(self._metrics)} %Y.%m.%d %H:%M:%S')
-            log_filepath += '.log'
-            logging_handlers.append(logging.FileHandler(filename=log_filepath, encoding='utf-8', mode='w'))
+        # logger.add(sys.stdout, colorize=True, format='{level} {message}', level='INFO')
 
-        for h in logging_handlers:
-            logger.add(h, colorize=True, format='{level} {message}', level='INFO')
-
-        logger.info(f"Optimization metrics are {self._metrics}.")
+        logger.info(f"Validation metric is {self.validation_metric}.")
 
     @final
     def _run_on_dataset(self, dataset: TabularDataset) -> None:
@@ -104,7 +79,7 @@ class MLBench:
             raise TypeError(f"pd.DataFrame or np.ndarray was expected. Got: {type(dataset.X)}")
 
         logger.info(f"{dataset.id}...Loaded dataset name: {dataset.name}.")
-        logger.debug(f'Rows: {X_train.shape[0]}. Columns: {X_train.shape[1]}')
+        logger.info(f'Rows: {X_train.shape[0]}. Columns: {X_train.shape[1]}')
         
         class_belongings = Counter(y_train)
         logger.info(class_belongings)
@@ -133,29 +108,32 @@ class MLBench:
         logger.debug(f"Train sample size is approximately {training_dataset.size} mb.")
 
         id = itertools.count(start=1)
-        for metric in self._metrics:
-            task  = MLTask(
-                id=next(id),
-                dataset=training_dataset,
-                metric=metric
-            )
+        task  = MLTask(
+            id=next(id),
+            dataset=training_dataset,
+            metric=self.validation_metric
+        )
 
-            start_time = time.time()
-            self._automl.fit(task)
-            time_passed = time.time() - start_time
-            
-            logger.info(f"Training successfully finished.")
-            logger.info(f"Training took {time_passed // 60} min.")
+        start_time = time.time()
+        self._automl.fit(task)
 
-            y_predicted = self._automl.predict(X_test)
-            self._automl.score(metric, y_test, y_predicted, positive_class_label)
-    
+        time_passed = time.time() - start_time
+        logger.info(f"Training took {time_passed // 60} min.")
+
+        y_predicted = self._automl.predict(X_test)
+
+        metrics = {self.validation_metric}
+        if self._test_metrics is not None:
+            for metric in self._test_metrics:
+                metrics.append(metric)
+        self._automl.score(metrics, y_test, y_predicted, positive_class_label)
+
     @property
-    def repository(self):
+    def repository(self) -> TabularDatasetRepository:
         return self._repository
     
     @repository.setter
-    def repository(self, value):
+    def repository(self, value: str):
         if value == 'zenodo':
             self._repository = ZenodoRepository()
         elif value == 'openml':
@@ -167,3 +145,34 @@ class MLBench:
                 Options available: ['openml', 'zenodo'].
                 """
             )
+    
+    @property
+    def validation_metric(self) -> str:
+        return self._validation_metric
+    
+    @validation_metric.setter
+    def validation_metric(self, value: str):
+        if value not in ['f1', 'bal_acc', 'ap']:
+                raise ValueError(
+                    f"""
+                    Invalid value of metric parameter: {value}.
+                    Options available: ['f1', 'bal_acc', 'ap'].
+                    """)
+        self._validation_metric = value
+    
+    @property
+    def automl(self) -> AutoML:
+        return self._automl
+
+    @automl.setter
+    def automl(self, value: Tuple[str, Tuple[Any, ...], Dict[str, Any]]):
+        if value[0] == 'ag':
+            self._automl = AutoGluon(*value[1], **value[2])
+        elif value[0] == 'imbaml':
+            self._automl = Imbaml(*value[1], **value[2])
+        else:
+            raise ValueError(
+                f"""
+                Invalid value of automl parameter: {value[0]}.
+                Options available: ['ag', 'imbaml'].
+                """)

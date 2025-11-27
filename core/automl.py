@@ -4,7 +4,7 @@ import pprint
 import re
 from abc import ABC, abstractmethod
 from io import StringIO
-from typing import Optional, Union, final, List, Dict
+from typing import Optional, Set, Union, final, List, Dict
 import autogluon.tabular
 import numpy as np
 import pandas as pd
@@ -42,7 +42,7 @@ class AutoML(ABC):
     @final
     def score(
         self,
-        metrics: Union[str, List[str]],
+        metrics: Set[str],
         y_test: Union[pd.DataFrame, np.ndarray],
         y_pred: Union[pd.DataFrame, np.ndarray],
         pos_label: Optional[int] = None,
@@ -54,16 +54,10 @@ class AutoML(ABC):
             'pos_label': pos_label
         }
 
-        # TODO: add handling for 'all'.
-        if isinstance(metrics, str):
+        for metric in metrics:
             self._calculate_metric_score(
-                metrics,
+                metric,
                 **calculate_metric_score_kwargs)
-        elif isinstance(metrics, list):
-            for metric in metrics:
-                self._calculate_metric_score(
-                    metric,
-                    **calculate_metric_score_kwargs)
 
     @final
     def _log_val_loss_alongside_fitted_model(self, losses: Dict[str, np.float64]) -> None:
@@ -88,13 +82,19 @@ class AutoML(ABC):
 
         if metric == 'f1':
             f1 = fbeta_score(y_test, y_pred, beta=1, pos_label=pos_label)
-            logger.info(f"F1 score: {f1:.3f}")
+            logger.info(f"F1 score: {f1:.3f}.")
         elif metric == 'balanced_accuracy':
             balanced_accuracy = balanced_accuracy_score(y_test, y_pred)
-            logger.info(f"Balanced accuracy score: {balanced_accuracy:.3f}")
+            logger.info(f"Balanced accuracy score: {balanced_accuracy:.3f}.")
         elif metric == 'average_precision':
             average_precision = average_precision_score(y_test, y_pred, pos_label=pos_label)
-            logger.info(f"Average precision score: {average_precision:.3f}")
+            logger.info(f"Average precision score: {average_precision:.3f}.")
+        else:
+            raise ValueError(
+                f"""
+                Invalid value encountered among values of test_metrics parameter:{metric}.
+                Metrics available: ['f1', 'average_precision', 'balanced_accuracy'].        
+                """)
 
     def __str__(self):
         return self.__class__.__name__
